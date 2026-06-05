@@ -1,0 +1,32 @@
+[
+  {
+    "tenant": "demoB",
+    "source": "m365",
+    "workload": "Exchange",
+    "event_type": "MailboxLogin",
+    "status": "Success",
+    "user": "alice@demob.com",
+    "ip": "203.114.10.5",
+    "@timestamp": "2026-03-08T08:00:00Z"
+  },
+  {
+    "tenant": "demoB",
+    "source": "m365",
+    "workload": "AzureAD",
+    "event_type": "LogonFailed",
+    "status": "Failed",
+    "user": "hacker01",
+    "ip": "114.12.55.99",
+    "@timestamp": "2026-03-08T08:05:00Z"
+  },
+  {
+    "tenant": "demoB",
+    "source": "m365",
+    "workload": "SharePoint",
+    "event_type": "FileDownloaded",
+    "status": "Success",
+    "user": "bob@demob.com",
+    "ip": "203.114.10.6",
+    "@timestamp": "2026-03-08T09:15:00Z"
+  }
+]
