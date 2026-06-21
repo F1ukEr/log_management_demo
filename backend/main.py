@@ -1,15 +1,11 @@
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from dateutil import parser
-from datetime import datetime
-from pydantic import BaseModel
 from datetime import datetime, timedelta
+from pydantic import BaseModel
 import json
-import os
 import requests
-import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__))) # เพิ่มเส้นทางปัจจุบันเข้าไปใน sys.path เพื่อให้สามารถอิมพอร์ตไฟล์อื่นๆ ในโปรเจคได้
 
 # อิมพอร์ตไฟล์ที่เราสร้างไว้
 import models
@@ -17,7 +13,6 @@ from database import engine, get_db
 
 # สั่งให้ SQLAlchemy สร้างตารางในฐานข้อมูลอัตโนมัติตอนเริ่มรันแอป
 models.Base.metadata.create_all(bind=engine)
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://loguser:password@db:5432/logmanagement")
 
 app = FastAPI(title="Log Management API")
 app.add_middleware(
@@ -35,19 +30,48 @@ class LoginRequest(BaseModel):
 # ---------------------------------------------------------
 # ส่วนที่ 1: ฟังก์ชัน Normalization แปลงข้อมูลเข้า Schema กลาง
 # ---------------------------------------------------------
-def normalize_m365_log(raw_log: dict) -> dict:
+def parse_ts(raw: dict) -> datetime:
+    return parser.parse(raw.get("@timestamp", datetime.utcnow().isoformat() + "Z"))
+
+def normalize_log(source: str, raw_data: dict) -> dict:
+    if source == "m365":
+        return {
+            "timestamp": parse_ts(raw_data),
+            "tenant": raw_data.get("tenant", "unknown"),
+            "source": raw_data.get("source", "m365"),
+            "vendor": "Microsoft",
+            "product": raw_data.get("workload", "unknown"),
+            "event_type": raw_data.get("event_type", "unknown"),
+            "action": "login" if raw_data.get("status") == "Success" else "unknown",
+            "src_ip": raw_data.get("ip", ""),
+            "username": raw_data.get("user", ""), # ใช้ฟิลด์ username ให้ตรงกับ models.py
+            "raw": raw_data # เก็บ dict ดิบไว้ SQLAlchemy จะแปลงเป็น JSONB ให้เอง
+        }
+
+    if source == "syslog":
+        raw_payload = raw_data.get("payload", {})
+        raw_data.update(raw_payload) # ดึงข้อมูลจาก payload ขึ้นมาไว้บนระดับเดียวกับ log หลักเพื่อให้ง่ายต่อการเข้าถึง
+        return {
+            "timestamp": parse_ts(raw_data),
+            "tenant": raw_data.get("tenant", "demoA"),
+            "source": "syslog",
+            "event_type": raw_data.get("event_type", "firewall_alert"),
+            "username": raw_data.get("user", "-"), # ใส่ - ไว้ก่อนถ้า Syslog ไม่มีชื่อ User
+            "src_ip": raw_data.get("src_ip", ""),
+            "raw": raw_payload # 👈 ฟิลด์ยิบย่อยอย่าง src_port, dst_ip, protocol จะถูกเซฟในนี้อย่างปลอดภัย
+        }
+
+    # api, crowdstrike, aws
     return {
-        "timestamp":  parser.parse(raw_log.get("@timestamp", datetime.utcnow().isoformat() + "Z")),
-        "tenant": raw_log.get("tenant", "unknown"),
-        "source": raw_log.get("source", "m365"),
-        "vendor": "Microsoft",
-        "product": raw_log.get("workload", "unknown"),
-        "event_type": raw_log.get("event_type", "unknown"),
-        "action": "login" if raw_log.get("status") == "Success" else "unknown",
-        "src_ip": raw_log.get("ip", ""),
-        "username": raw_log.get("user", ""), # ใช้ฟิลด์ username ให้ตรงกับ models.py
-        "raw": raw_log # เก็บ dict ดิบไว้ SQLAlchemy จะแปลงเป็น JSONB ให้เอง
+        "timestamp": parse_ts(raw_data),
+        "tenant": raw_data.get("tenant", "demo"),
+        "source": "api",
+        "event_type": raw_data.get("event_type"),
+        "username": raw_data.get("user"),
+        "src_ip": raw_data.get("ip"),
+        "raw": raw_data
     }
+
 def enrich_geoip(ip_address: str) -> str:
     # เป็นฟังก์ชันจำลองการแปลง IP เป็นชื่อประเทศ
     if not ip_address: return "Unknown"
@@ -62,36 +86,11 @@ async def ingest_log(request: Request, db: Session = Depends(get_db)):
 
     raw_data = await request.json()
     source = raw_data.get("source")
-    
 
-    if source == "m365":
-        standardized_log = normalize_m365_log(raw_data)
-
-    elif source == "syslog":
-         raw_payload = raw_data.get("payload", {})
-         raw_data.update(raw_payload) # ดึงข้อมูลจาก payload ขึ้นมาไว้บนระดับเดียวกับ log หลักเพื่อให้ง่ายต่อการเข้าถึง
-         standardized_log = {
-            "timestamp": parser.parse(raw_data.get("@timestamp", datetime.utcnow().isoformat() + "Z")),
-            "tenant": raw_data.get("tenant", "demoA"),
-            "source": "syslog",
-            "event_type": raw_data.get("event_type", "firewall_alert"),
-            "username": raw_data.get("user", "-"), # ใส่ - ไว้ก่อนถ้า Syslog ไม่มีชื่อ User
-            "src_ip": raw_data.get("src_ip", ""),
-            "raw": raw_payload # 👈 ฟิลด์ยิบย่อยอย่าง src_port, dst_ip, protocol จะถูกเซฟในนี้อย่างปลอดภัย
-    }
-    elif source in ['api','crowdstrike','aws']:
-        standardized_log = {
-            "timestamp": parser.parse(raw_data.get("@timestamp", datetime.utcnow().isoformat() + "Z")),
-            "tenant": raw_data.get("tenant", "demo"),
-            "source": "api",
-            "event_type": raw_data.get("event_type"),
-            "username": raw_data.get("user"),
-            "src_ip": raw_data.get("ip"),
-            "raw": raw_data
-        }
-
-    else:
+    if source not in ("m365", "syslog", "api", "crowdstrike", "aws"):
         raise HTTPException(status_code=400, detail="Unsupported log source")
+
+    standardized_log = normalize_log(source, raw_data)
 
     try:
         standardized_log["raw"]["enriched_country"] = enrich_geoip(standardized_log["src_ip"])
@@ -143,15 +142,14 @@ async def ingest_log(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/api/ingest/file_sample")
-async def ingest_file_sample(db: Session = Depends(get_db)):
+async def ingest_file_sample(file: UploadFile = File(...), db: Session = Depends(get_db)):
     try:
-        with open("sample_logs.json", "r") as f:
-            sample_logs = json.load(f)
-        
+        sample_logs = json.loads(await file.read())
+
         for raw_log in sample_logs:
             source = raw_log.get("source")
             if source == "m365":
-                standardized_log = normalize_m365_log(raw_log)
+                standardized_log = normalize_log("m365", raw_log)
             else:
                 continue # ข้ามถ้าไม่ใช่ m365
 
@@ -194,7 +192,6 @@ def get_logs(limit: int = 50, tenant: str = None, user_role: str = None, db: Ses
             "total": len(logs),
             "data": logs
         }
-        #return logs
     except Exception as e:
         db.rollback() # ถอยการทำงานกลับหากเกิด Error ป้องกัน DB ค้าง
         raise HTTPException(status_code=500, detail=str(e))
@@ -203,16 +200,12 @@ def get_logs(limit: int = 50, tenant: str = None, user_role: str = None, db: Ses
 @app.get("/api/alerts")
 def get_alerts(limit: int = 50, tenant: str = None, db: Session = Depends(get_db)):
     try:
-        #alerts = db.query(models.Alert).join(models.LogEntry, models.Alert.log_id == models.LogEntry.id)
-        #if tenant:
-           #alerts = alerts.filter(models.LogEntry.tenant == tenant)
         alerts = db.query(models.Alert).order_by(models.Alert.timestamp.desc()).limit(limit).all()
         return {
             "status": "success",
             "total": len(alerts),
             "data": alerts
         }
-        #return alerts
     except Exception as e:
         db.rollback() # ถอยการทำงานกลับหากเกิด Error ป้องกัน DB ค้าง
         raise HTTPException(status_code=500, detail=str(e))
@@ -240,9 +233,6 @@ def login(request: LoginRequest):
 #ระบบแจ้งเตือน Webhook
 def webhook_alert(rule_name: str, message: str):
     webhook_url = "https://webhook.site/973beac3-74f7-4bcc-968f-14696345f1ad" # เปลี่ยนเป็น URL ของ Webhook ที่ต้องการส่งแจ้งเตือน
-    if not webhook_url:
-        print("No WEBHOOK_URL configured, skipping alert")
-        return
     payload = {
         "text": f"ALERT: {rule_name}\n{message}"
     }
@@ -250,7 +240,6 @@ def webhook_alert(rule_name: str, message: str):
         response = requests.post(webhook_url, json=payload)
         if response.status_code != 200:
             print(f"Failed to send alert: {response.status_code} {response.text}")
-        requests.post(webhook_url, json=payload)
         print(f"Alert sent: {message}")
     except Exception as e:
         print(f"Error sending alert: {str(e)}")

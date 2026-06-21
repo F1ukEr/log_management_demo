@@ -121,7 +121,6 @@ function App() {
       const tenant = log.tenant ? log.tenant.toLowerCase() : "";
       const source = log.source ? log.source.toLowerCase() : "";
       searchMatch = eventType.includes(query) || username.includes(query) || tenant.includes(query) || source.includes(query);
-      //searchMatch = log.event_type && log.event_type.toLowerCase().includes(query);
     }
     return matchesSearch && searchMatch;
     
