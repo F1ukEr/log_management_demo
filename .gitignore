@@ -87,3 +87,7 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+.claude/
+.github/
+CLAUDER.md
